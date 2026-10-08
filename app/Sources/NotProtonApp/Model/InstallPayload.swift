@@ -14,7 +14,7 @@ enum InstallPayload {
         let signatures: [URL]
     }
 
-    static func root(in bundle: Bundle = .module) throws -> URL {
+    static func root(in bundle: Bundle = .appResources) throws -> URL {
         guard let url = bundle.url(forResource: "payload", withExtension: nil) else {
             throw StepFailure(
                 step: step,
@@ -24,7 +24,7 @@ enum InstallPayload {
         return url
     }
 
-    static func locate(in bundle: Bundle = .module) throws -> Located {
+    static func locate(in bundle: Bundle = .appResources) throws -> Located {
         try locate(root: try root(in: bundle))
     }
 
@@ -69,5 +69,17 @@ enum InstallPayload {
             dylib: dylib, overlayShim: shim, iconmaker: iconmaker,
             appinfo: appinfo, signatures: signatures
         )
+    }
+}
+
+// Swift 6.1's generated accessor does not search Contents/Resources in an app.
+extension Bundle {
+    static var appResources: Bundle {
+        if let resources = Bundle.main.resourceURL,
+           let packaged = Bundle(url: resources.appendingPathComponent(
+               "NotProtonApp_NotProtonApp.bundle")) {
+            return packaged
+        }
+        return .module
     }
 }
