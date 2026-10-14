@@ -1,15 +1,17 @@
 CC       := clang
 ARCH     := arm64
 MIN_VER  := 15.0
+GLASS_SDK := 26.0
+AVAIL    := -Werror=unguarded-availability-new
 
-CFLAGS   := -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) \
+CFLAGS   := -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) $(AVAIL) \
             -std=c17 -O2 -Wall -Wextra -Wno-unused-parameter \
             -fPIC -MMD -MP \
             -Idylib -Ivendor -Ivendor/dobby/include
 LDFLAGS  := -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) \
             -dynamiclib -install_name @rpath/notproton.dylib
 
-FRAMEWORKS := -framework CoreFoundation
+FRAMEWORKS := -framework CoreFoundation -framework CoreGraphics
 
 DOBBY_DIR  := build/dobby
 DOBBY_LIBS := $(DOBBY_DIR)/libdobby.a \
@@ -36,13 +38,17 @@ SRCS := \
 	dylib/hooks/hook_webui.c \
 	dylib/hooks/hook_webpatch.c \
 	dylib/hooks/hook_spawn.c \
+	dylib/hooks/hook_launch.c \
 	dylib/feats/compat.c \
 	dylib/feats/webui.c \
 	dylib/feats/compatsvc.c \
 	dylib/feats/webpatch.c \
+	dylib/feats/input_access.c \
 	vendor/cJSON.c
 
 OUT_DIR     := out
+TEST_CC     := $(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g \
+	-Wall -Wextra -Wno-unused-parameter -Idylib
 
 GENERATED_DIR := $(OUT_DIR)/generated
 RUN_SCRIPT_H  := $(GENERATED_DIR)/compat_run.h
@@ -55,16 +61,18 @@ TARGET      := $(OUT_DIR)/notproton.dylib
 OBJS := $(patsubst %.c,$(OUT_DIR)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all clean rebuild dobby deploy dylib-install sigcheck app-payload app app-zip \
+.PHONY: all clean rebuild dobby deploy dylib dylib-install sigcheck fonts fonts-install app-payload app app-zip \
         anchorcheck callscheck sigdb-fixtures webpatch-fixtures peicon-fixtures panel-behavior app-tests \
         tests-list overlay-shim overlay-shim-install overlay-shim-tests \
         overlay-shim-bench iconmaker icon \
         appinfo helpers-install ntdll-resolve bridge runcheck compatcheck \
-        compatsvc-check scriptcheck
+        compatsvc-check scriptcheck envcheck buildcheck settingscheck routecheck bridgecheck gamedrivecheck launchercheck launch-shell FORCE
 
 APP_PAYLOAD := app/Sources/NotProtonApp/Resources/payload
 
 all: $(TARGET) $(APP_PAYLOAD)
+
+dylib: $(TARGET)
 
 # SwiftPM's `.copy("Resources/payload")` in Package.swift needs this directory
 # to exist
@@ -85,6 +93,43 @@ runcheck:
 	shellcheck dylib/feats/compat_run.sh && sh -n dylib/feats/compat_run.sh && \
 	echo "==> runcheck: the run script lints and parses clean"
 
+.PHONY: seedcheck
+seedcheck:
+	@if [ ! -f dylib/tests/seedcheck.sh ]; then $(call SKIP,seedcheck,dylib/tests/seedcheck.sh); exit 0; fi; \
+	sh dylib/tests/seedcheck.sh dylib/feats/compat_run.sh
+
+envcheck:
+	@if [ ! -f dylib/tests/envcheck.sh ]; then $(call SKIP,envcheck,dylib/tests/envcheck.sh); exit 0; fi; \
+	sh dylib/tests/envcheck.sh dylib/feats/compat_run.sh
+
+buildcheck:
+	@if [ ! -f dylib/tests/buildcheck.sh ]; then $(call SKIP,buildcheck,dylib/tests/buildcheck.sh); exit 0; fi; \
+	sh dylib/tests/buildcheck.sh dylib/feats/compat_run.sh
+
+settingscheck:
+	@if [ ! -f dylib/tests/settingscheck.sh ]; then $(call SKIP,settingscheck,dylib/tests/settingscheck.sh); exit 0; fi; \
+	sh dylib/tests/settingscheck.sh dylib/feats/compat_run.sh
+
+routecheck:
+	@if [ ! -f dylib/tests/routecheck.sh ]; then $(call SKIP,routecheck,dylib/tests/routecheck.sh); exit 0; fi; \
+	sh dylib/tests/routecheck.sh dylib/feats/compat_run.sh
+
+bridgecheck:
+	@if [ ! -f dylib/tests/bridgecheck.sh ]; then $(call SKIP,bridgecheck,dylib/tests/bridgecheck.sh); exit 0; fi; \
+	sh dylib/tests/bridgecheck.sh dylib/feats/compat_run.sh
+
+gamedrivecheck:
+	@if [ ! -f dylib/tests/gamedrivecheck.sh ]; then $(call SKIP,gamedrivecheck,dylib/tests/gamedrivecheck.sh); exit 0; fi; \
+	sh dylib/tests/gamedrivecheck.sh dylib/feats/compat_run.sh
+
+launchercheck:
+	@if [ ! -f dylib/tests/launchercheck.sh ]; then $(call SKIP,launchercheck,dylib/tests/launchercheck.sh); exit 0; fi; \
+	sh dylib/tests/launchercheck.sh dylib/feats/compat_run.sh
+
+.PHONY: mincheck
+mincheck:
+	@sh dylib/tests/mincheck.sh "$(APP_BUNDLE)" "$(MIN_VER)" "$(GLASS_SDK)"
+
 # runcheck owns compat_run.sh, whose warnings wait for a change that can move
 # the embedded __text baseline
 SCRIPTS := $(shell git ls-files '*.sh' 2>/dev/null | grep -v '^dylib/feats/compat_run\.sh$$')
@@ -104,8 +149,7 @@ COMPATCHECK := $(OUT_DIR)/compatcheck
 compatcheck: $(RUN_SCRIPT_H)
 	@if [ ! -f dylib/tests/compatcheck.c ]; then $(call SKIP,compatcheck,dylib/tests/compatcheck.c); exit 0; fi; \
 	mkdir -p $(OUT_DIR) && \
-	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g \
-	  -Wall -Wextra -Wno-unused-parameter -Idylib -I$(GENERATED_DIR) \
+	$(TEST_CC) -I$(GENERATED_DIR) \
 	  -o $(COMPATCHECK) dylib/tests/compatcheck.c && \
 	$(COMPATCHECK)
 
@@ -114,9 +158,7 @@ COMPATSVC_CHECK := $(OUT_DIR)/compatsvc-check
 compatsvc-check:
 	@if [ ! -f dylib/tests/compatsvc-check.c ]; then $(call SKIP,compatsvc-check,dylib/tests/compatsvc-check.c); exit 0; fi; \
 	mkdir -p $(OUT_DIR) && \
-	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g \
-	  -Wall -Wextra -Wno-unused-parameter -Idylib \
-	  -o $(COMPATSVC_CHECK) dylib/tests/compatsvc-check.c && \
+	$(TEST_CC) -o $(COMPATSVC_CHECK) dylib/tests/compatsvc-check.c && \
 	$(COMPATSVC_CHECK)
 
 sigcheck:
@@ -130,10 +172,9 @@ ANCHORCHECK_SRCS := dylib/tests/anchorcheck.c \
 	dylib/resolver/resolver.c dylib/resolver/sigdb.c \
 	dylib/util/log.c dylib/util/file.c vendor/cJSON.c
 
-$(ANCHORCHECK): $(ANCHORCHECK_SRCS)
+$(ANCHORCHECK): $(ANCHORCHECK_SRCS) FORCE
 	@mkdir -p $(dir $@)
-	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g -O1 \
-	  -Wall -Wextra -Wno-unused-parameter -Idylib -Ivendor \
+	$(TEST_CC) -O1 -Ivendor \
 	  -o $@ $(ANCHORCHECK_SRCS)
 
 anchorcheck:
@@ -181,9 +222,7 @@ PEICON_CHECK := $(OUT_DIR)/peicon-check
 
 $(PEICON_CHECK): dylib/tests/peicon-check.c dylib/util/peicon.c dylib/util/peicon.h
 	@mkdir -p $(dir $@)
-	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g -O1 \
-	  -Wall -Wextra -Wno-unused-parameter -Idylib \
-	  -o $@ dylib/tests/peicon-check.c dylib/util/peicon.c
+	$(TEST_CC) -O1 -o $@ dylib/tests/peicon-check.c dylib/util/peicon.c
 
 peicon-fixtures:
 	@if [ ! -f dylib/tests/peicon-check.c ]; then \
@@ -201,8 +240,7 @@ WEBPATCH_FIXTURES := dylib/tests/webpatch-fixtures
 
 $(GATECHECK): dylib/tests/gatecheck.c dylib/feats/webpatch.c dylib/feats/webpatch.h
 	@mkdir -p $(dir $@)
-	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g -O1 \
-	  -Wall -Wextra -Wno-unused-parameter -Idylib -o $@ dylib/tests/gatecheck.c
+	$(TEST_CC) -O1 -o $@ dylib/tests/gatecheck.c
 
 webpatch-fixtures:
 	@if [ ! -d $(WEBPATCH_FIXTURES) ] || [ ! -f dylib/tests/gatecheck.c ]; then \
@@ -227,13 +265,20 @@ webpatch-fixtures:
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
 	echo "==> gate table and $$n webpatch fixtures: anchors intact, drift refused"
 
+LAUNCH_SHELL := $(OUT_DIR)/launch-shell
+
+launch-shell:
+	@if [ ! -f dylib/tests/launch-shell.c ]; then $(call SKIP,launch-shell,dylib/tests/launch-shell.c); exit 0; fi; \
+	mkdir -p $(OUT_DIR) && \
+	$(TEST_CC) -O1 -o $(LAUNCH_SHELL) dylib/tests/launch-shell.c && \
+	$(LAUNCH_SHELL)
+
 SPAWN_ENV := $(OUT_DIR)/spawn-env
 
 spawn-env:
 	@if [ ! -f dylib/tests/spawn-env.c ]; then $(call SKIP,spawn-env,dylib/tests/spawn-env.c); exit 0; fi; \
 	mkdir -p $(OUT_DIR) && \
-	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g -O1 \
-	  -Wall -Wextra -Wno-unused-parameter -Idylib -o $(SPAWN_ENV) dylib/tests/spawn-env.c && \
+	$(TEST_CC) -O1 -o $(SPAWN_ENV) dylib/tests/spawn-env.c && \
 	$(SPAWN_ENV)
 
 SPAWN_LIVE := dylib/tests/spawn-live
@@ -247,17 +292,21 @@ spawn-live: $(TARGET)
 	  -o $$tmp/steam_osx $(SPAWN_LIVE)/driver.c || exit 1; \
 	cp $$tmp/steam_osx $$tmp/inert; cp $$tmp/child $$tmp/steam_osx_child; \
 	cp $$tmp/child $$tmp/sub/steam_osx; \
+	cp $$tmp/steam_osx "$$tmp/Steam Helper"; cp $$tmp/child "$$tmp/sub/Steam Helper"; \
 	fail=0; \
 	for spec in "inert:child:1" "steam_osx:child:0" \
-	            "steam_osx:steam_osx_child:0" "steam_osx:sub/steam_osx:1"; do \
-		drv=$${spec%%:*}; rest=$${spec#*:}; kid=$${rest%:*}; want=$${rest##*:}; \
-		got=$$(DYLD_INSERT_LIBRARIES=$$PWD/$(TARGET) $$tmp/$$drv $$tmp/$$kid 2>/dev/null \
-		       | grep -c "^DYLD_INSERT_LIBRARIES=") || true; \
+	            "steam_osx:steam_osx_child:0" "steam_osx:sub/steam_osx:1" \
+	            "steam_osx:sub/Steam Helper:1" "Steam Helper:child:0" \
+	            "Steam Helper:sub/Steam Helper:1" "Steam Helper:child:1:--type=renderer"; do \
+		drv=$${spec%%:*}; rest=$${spec#*:}; kid=$${rest%%:*}; rest=$${rest#*:}; \
+		want=$${rest%%:*}; arg=$${rest#*:}; [ "$$arg" = "$$rest" ] && arg=""; \
+		got=$$(DYLD_INSERT_LIBRARIES=$$PWD/$(TARGET) "$$tmp/$$drv" "$$tmp/$$kid" $$arg 2>/dev/null \
+		       | grep -c "/notproton.dylib$$") || true; \
 		if [ "$$got" != "$$want" ]; then \
-			echo "$$drv -> $$kid: insert present $$got, wanted $$want"; fail=1; fi; \
+			echo "$$drv $$arg -> $$kid: insert present $$got, wanted $$want"; fail=1; fi; \
 	done; \
 	if [ $$fail -ne 0 ]; then exit 1; fi; \
-	echo "==> spawn live: the hook lands, steam_osx keeps the insert, other children do not"
+	echo "==> spawn live: the hook lands, steam_osx and Steam Helper keep the insert, other children do not"
 
 APP_TESTS := app/Tests
 
@@ -272,11 +321,13 @@ panel-behavior:
 	if ! command -v node >/dev/null 2>&1; then \
 		echo "==> panel-behavior: node not found, skipped"; exit 0; fi; \
 	mkdir -p $(OUT_DIR) && \
-	$(CC) -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -g -O1 \
-	  -Wall -Wextra -Wno-unused-parameter -Idylib -o $(OUT_DIR)/panel-emit \
+	$(TEST_CC) -O1 -o $(OUT_DIR)/panel-emit \
 	  $(PANEL_TESTS)/emit.c && \
 	node $(PANEL_TESTS)/behavior.js $(OUT_DIR)/panel-emit && \
 	node $(PANEL_TESTS)/switching.js $(OUT_DIR)/panel-emit && \
+	node $(PANEL_TESTS)/launch-options.js $(OUT_DIR)/panel-emit && \
+	node $(PANEL_TESTS)/shell.js $(OUT_DIR)/panel-emit && \
+	node $(PANEL_TESTS)/migration.js $(OUT_DIR)/panel-emit && \
 	echo "==> panel behavior: renders as expected, no stale arguments"
 
 CX_ROOT ?= /Applications/CrossOver Preview.app
@@ -296,7 +347,7 @@ $(ARM64_DYLIB): $(OBJS)
 
 $(X86_STUB): dylib/stub_x86_64.c
 	@mkdir -p $(dir $@)
-	$(CC) -arch x86_64 -mmacosx-version-min=$(MIN_VER) \
+	$(CC) -arch x86_64 -mmacosx-version-min=$(MIN_VER) $(AVAIL) \
 		-dynamiclib -install_name @rpath/notproton.dylib \
 		-o $@ $<
 
@@ -320,7 +371,7 @@ OVERLAY_SHIM_SRC   := overlay-shim/overlay_shim.m
 OVERLAY_SHIM_ARM   := $(OUT_DIR)/overlay-shim.arm64.dylib
 OVERLAY_SHIM_X86   := $(OUT_DIR)/overlay-shim.x86_64.dylib
 OVERLAY_SHIM       := $(OUT_DIR)/overlay-shim.dylib
-OVERLAY_SHIM_FLAGS := -mmacosx-version-min=$(MIN_VER) -dynamiclib -O2 -Wall -Wextra \
+OVERLAY_SHIM_FLAGS := -mmacosx-version-min=$(MIN_VER) $(AVAIL) -dynamiclib -O2 -Wall -Wextra \
                       -install_name @rpath/overlay-shim.dylib \
                       -framework Metal -framework QuartzCore \
                       -framework CoreGraphics -framework CoreFoundation
@@ -387,7 +438,7 @@ iconmaker: $(ICONMAKER)
 
 $(ICONMAKER): helpers/iconmaker.swift dylib/util/peicon.c dylib/util/peicon.h
 	@mkdir -p $(OUT_DIR)
-	$(CC) -c -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) -std=c17 -O2 \
+	$(CC) -c -arch $(ARCH) -mmacosx-version-min=$(MIN_VER) $(AVAIL) -std=c17 -O2 \
 		-Wall -Wextra -o $(OUT_DIR)/peicon-host.o dylib/util/peicon.c
 	swiftc -O -target $(ARCH)-apple-macos$(MIN_VER) \
 		-framework AppKit -import-objc-header dylib/util/peicon.h \
@@ -433,7 +484,15 @@ sigdb-install:
 
 LAUNCHABLE_BUNDLES := $(HOME)/Desktop/NotProton.app /Applications/NotProton.app
 
-deploy: $(TARGET) dylib-install sigdb-install helpers-install
+FONT_FILES := --include='*/' --include='*.ttf' --include='*.ttc' --exclude='*'
+
+fonts-install:
+	@if [ ! -d build/fonts ]; then echo "build/fonts is missing, run: $(MAKE) fonts" >&2; exit 1; fi
+	@mkdir -p "$(SUPPORT_DIR)/fonts"
+	@rsync -a --delete $(FONT_FILES) build/fonts/ "$(SUPPORT_DIR)/fonts/"
+	@echo "==> Installed: $(SUPPORT_DIR)/fonts"
+
+deploy: $(TARGET) dylib-install sigdb-install fonts-install helpers-install
 	@if [ ! -d "$(STEAM_APP)" ]; then \
 		echo "==> deploy: $(STEAM_APP) not found"; exit 1; fi
 	$(call install_atomically,$(TARGET),$(DEPLOY_DST))
@@ -466,6 +525,9 @@ bridge:
 	steam-shim/build.sh
 	@echo "==> Built the bridge, now run: $(MAKE) app-payload"
 
+fonts:
+	fonts/build.sh
+
 app-payload: $(TARGET) $(OVERLAY_SHIM) $(ICONMAKER) $(APPINFO)
 	@mkdir -p "$(APP_PAYLOAD)/signatures/macos.arm64"
 	@mkdir -p "$(APP_PAYLOAD)/bridge"
@@ -473,6 +535,7 @@ app-payload: $(TARGET) $(OVERLAY_SHIM) $(ICONMAKER) $(APPINFO)
 	cp -f $(OVERLAY_SHIM) "$(APP_PAYLOAD)/overlay-shim.dylib"
 	cp -f $(ICONMAKER) "$(APP_PAYLOAD)/iconmaker"
 	cp -f $(APPINFO) "$(APP_PAYLOAD)/appinfo"
+	cp -f dylib/feats/compat_run.sh "$(APP_PAYLOAD)/run"
 	cp -f signatures/macos.arm64/*.json "$(APP_PAYLOAD)/signatures/macos.arm64/"
 	@set -e; for spec in $(BRIDGE_FILES); do \
 		src="$${spec%%:*}"; dst="$(APP_PAYLOAD)/bridge/$${spec##*:}"; \
@@ -480,6 +543,12 @@ app-payload: $(TARGET) $(OVERLAY_SHIM) $(ICONMAKER) $(APPINFO)
 		elif [ -f "$$dst" ]; then echo "==> keeping staged $${spec##*:}"; \
 		else echo "$$src is missing and nothing is staged at $$dst, run: $(MAKE) bridge" >&2; exit 1; fi; \
 	done
+	@if [ ! -d build/fonts ]; then echo "build/fonts is missing, run: $(MAKE) fonts" >&2; exit 1; fi
+	@mkdir -p "$(APP_PAYLOAD)/fonts"
+	@rsync -a --delete build/fonts/ "$(APP_PAYLOAD)/fonts/"
+	@stamp="$$(git log -1 --format=%ct 2>/dev/null)"; \
+	if [ -z "$$stamp" ]; then echo "build-time needs a git checkout" >&2; exit 1; fi; \
+	echo "$$stamp" > "$(APP_PAYLOAD)/build-time"
 	@echo "==> Staged app payload in $(APP_PAYLOAD)"
 
 APP_BUNDLE  := $(OUT_DIR)/NotProton.app
@@ -506,7 +575,7 @@ $(ICON_CAR): $(ICONGEN)
 	$(ICONGEN) "$(ICON_DOC)"
 	@mkdir -p "$(ICON_DIR)"
 	xcrun actool "$(ICON_DOC)" --compile "$(ICON_DIR)" --platform macosx \
-		--minimum-deployment-target 26.0 --app-icon NotProton \
+		--minimum-deployment-target 15.0 --app-icon NotProton \
 		--output-partial-info-plist "$(ICON_DIR)/partial.plist" >/dev/null
 	@echo "==> Built $@"
 
@@ -525,6 +594,9 @@ app: app-payload $(ICON_CAR)
 	ditto "$$(swift build --package-path app -c release --show-bin-path)/Sparkle.framework" \
 		"$(APP_BUNDLE)/Contents/Frameworks/Sparkle.framework"
 	install_name_tool -add_rpath @executable_path/../Frameworks \
+		"$(APP_BUNDLE)/Contents/MacOS/NotProtonApp"
+	xcrun vtool -set-build-version macos $(MIN_VER) "$$(xcrun --sdk macosx --show-sdk-version)" \
+		-replace -output "$(APP_BUNDLE)/Contents/MacOS/NotProtonApp" \
 		"$(APP_BUNDLE)/Contents/MacOS/NotProtonApp"
 	cp -R "$$(swift build --package-path app -c release --show-bin-path)/NotProtonApp_NotProtonApp.bundle" \
 		"$(APP_BUNDLE)/Contents/Resources/"
@@ -556,3 +628,5 @@ clean:
 rebuild: clean all
 
 -include $(DEPS)
+
+FORCE:

@@ -1,4 +1,6 @@
-// Prints its own environment so the caller can see whether the insert reached it.
+#include <mach-o/dyld.h>
 #include <stdio.h>
-extern char **environ;
-int main(void) { for (int i = 0; environ[i]; i++) puts(environ[i]); return 0; }
+int main(void) {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) puts(_dyld_get_image_name(i));
+    return 0;
+}

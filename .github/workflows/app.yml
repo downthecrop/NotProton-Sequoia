@@ -12,6 +12,7 @@ permissions:
 
 env:
   DOBBY_COMMIT: "5dfc8546954ce3b3198132ab13fddb89ee92cdd7"
+  FONT_TOOLS: "afdko==4.0.3 fonttools==4.66.1"
 
 jobs:
   build:
@@ -85,11 +86,24 @@ jobs:
             scratch/wine-build-arm64
           key: wine-xcode-27-${{ hashFiles('bridge/setup-wine-tree.sh', 'bridge/register-components.diff') }}
 
+      - name: Install font tools
+        run: |
+          brew install fontforge gpatch
+          python3 -m venv scratch/fontvenv
+          scratch/fontvenv/bin/pip install $FONT_TOOLS
+          echo "$PWD/scratch/fontvenv/bin" >> "$GITHUB_PATH"
+
+      - name: Build the fonts
+        run: make fonts
+
       - name: Stage the app payload
         run: make app-payload
 
       - name: Build the app
         run: make app
+
+      - name: Check the minimum macOS version
+        run: make -s mincheck
 
       - name: Run the hermetic C suites
         run: |
@@ -101,6 +115,15 @@ jobs:
           make -s spawn-env
           make -s compatcheck
           make -s compatsvc-check
+          make -s launch-shell
+          make -s envcheck
+          make -s buildcheck
+          make -s settingscheck
+          make -s routecheck
+          make -s bridgecheck
+          make -s gamedrivecheck
+          make -s launchercheck
+          make -s seedcheck
 
       - name: Run the Swift tests
         run: make -s app-tests

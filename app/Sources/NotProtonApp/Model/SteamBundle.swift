@@ -15,6 +15,8 @@ enum SteamDeployment: Sendable, Equatable {
 enum SteamBundle {
 
     static let insertKey = "DYLD_INSERT_LIBRARIES"
+    static let controllerBlockKey = "SDL_JOYSTICK_BLACKLIST_DEVICES"
+    static let controllerBlockValue = "0x05ac/0x0004"
 
     static let plistBackupName = "Info.plist.before-notproton"
     static let environmentKey = "LSEnvironment"
@@ -46,6 +48,10 @@ enum SteamBundle {
 
         guard files.fileExists(atPath: deployedDylib) else { return .notInstalled }
 
+        guard currentControllerBlock(at: plist) == controllerBlockValue else {
+            return .outdated(deployed: deployedVersion(at: versionFile) ?? "", bundled: bundledVersion)
+        }
+
         guard let deployed = deployedVersion(at: versionFile) else { return .installed(version: nil) }
         if deployed == bundledVersion { return .installed(version: deployed) }
         return .outdated(deployed: deployed, bundled: bundledVersion)
@@ -56,6 +62,13 @@ enum SteamBundle {
               let environment = dict[environmentKey] as? [String: Any]
         else { return nil }
         return environment[insertKey] as? String
+    }
+
+    static func currentControllerBlock(at url: URL = SupportPaths.Steam.infoPlist) -> String? {
+        guard let dict = readInfoPlist(at: url),
+              let environment = dict[environmentKey] as? [String: Any]
+        else { return nil }
+        return environment[controllerBlockKey] as? String
     }
 
     static func deployedVersion(at url: URL = SupportPaths.deployedVersion) -> String? {
@@ -73,14 +86,16 @@ enum SteamBundle {
         guard isRunning else { return false }
         onStopping()
 
-        _ = try? Shell.run("/usr/bin/pkill", ["-x", "steam_osx"])
+        _ = try? Shell.run("/usr/bin/open", ["-g", "steam://exit"])
         for _ in 0..<60 where isRunning {
             Thread.sleep(forTimeInterval: 0.5)
         }
 
         if isRunning {
             _ = try? Shell.run("/usr/bin/pkill", ["-9", "-x", "steam_osx"])
-            Thread.sleep(forTimeInterval: 1)
+            for _ in 0..<10 where isRunning {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
         }
 
         guard !isRunning else {

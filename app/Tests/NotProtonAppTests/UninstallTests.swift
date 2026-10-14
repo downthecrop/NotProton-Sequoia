@@ -16,6 +16,13 @@ struct UninstallTests {
         var all: [UninstallPhase] { lock.lock(); defer { lock.unlock() }; return seen }
     }
 
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var raised = false
+        func set() { lock.withLock { raised = true } }
+        var value: Bool { lock.withLock { raised } }
+    }
+
     private struct Layout: Sendable {
         let root: URL
         let app: URL
@@ -25,6 +32,12 @@ struct UninstallTests {
         let compatTool: URL
         let support: URL
         let caches: URL
+
+        var compatTools: [URL] {
+            SupportPaths.Steam.notprotonTools(in: compatTool.deletingLastPathComponent())
+        }
+        var secondTool: URL { compatTool.deletingLastPathComponent().appending(path: "notproton-26.3") }
+        var foreignTool: URL { compatTool.deletingLastPathComponent().appending(path: "GE-Proton9-1") }
 
         var outerPlist: URL { app.appending(path: "Contents/Info.plist") }
         var dylib: URL { app.appending(path: "Contents/MacOS/\(SupportPaths.dylibName)") }
@@ -41,7 +54,9 @@ struct UninstallTests {
         let support = root.appending(path: "notproton")
         let caches = root.appending(path: "valve-packages")
 
-        for dir in [macOS, inner, legacyCompat, compatTool, support, caches] {
+        let tools = compatTool.deletingLastPathComponent()
+        for dir in [macOS, inner, legacyCompat, compatTool, support, caches,
+                    tools.appending(path: "notproton-26.3"), tools.appending(path: "GE-Proton9-1")] {
             try files.createDirectory(at: dir, withIntermediateDirectories: true)
         }
 
@@ -198,8 +213,9 @@ struct UninstallTests {
             innerPlist: layout.innerPlist,
             updateBlocks: [layout.updateBlock],
             legacyCompat: layout.legacyCompat,
-            compatTool: layout.compatTool,
+            compatTools: layout.compatTools,
             directories: [layout.support, layout.caches],
+            libraries: [],
             repair: { _ in throw Offline() },
             stop: { _ in false }
         )
@@ -214,7 +230,65 @@ struct UninstallTests {
             !files.fileExists(atPath: layout.compatTool.path(percentEncoded: false)),
             "Steam would still list the tool in its dropdown after a removal"
         )
+        #expect(!files.fileExists(atPath: layout.secondTool.path(percentEncoded: false)))
+        #expect(files.fileExists(atPath: layout.foreignTool.path(percentEncoded: false)))
         #expect(unpinnedWithoutLosingTheRest(layout.updateBlock))
+    }
+
+    @Test("A removal does not install Steam when there is none")
+    func leavesAMissingSteamMissing() async throws {
+        let layout = try layout()
+        defer { try? FileManager.default.removeItem(at: layout.root) }
+        try FileManager.default.removeItem(at: layout.app)
+        let repaired = Flag()
+
+        let outcome = try await Uninstall.run(
+            app: layout.app,
+            innerPlist: layout.innerPlist,
+            updateBlocks: [layout.updateBlock],
+            legacyCompat: layout.legacyCompat,
+            compatTools: layout.compatTools,
+            directories: [layout.support, layout.caches],
+            libraries: [],
+            repair: { _ in repaired.set() },
+            stop: { _ in false }
+        )
+
+        #expect(!repaired.value)
+        #expect(!outcome.steamInstalled)
+        #expect(!outcome.steamNeedsRedownload)
+        #expect(!FileManager.default.fileExists(atPath: layout.app.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: layout.support.path(percentEncoded: false)))
+    }
+
+    @Test("A restore that fails asks for a redownload")
+    func asksForARedownloadWhenTheRestoreFails() async throws {
+        let layout = try layout()
+        defer { try? FileManager.default.removeItem(at: layout.root) }
+        struct Offline: Error {}
+
+        let outcome = try await Uninstall.run(
+            app: layout.app,
+            innerPlist: layout.innerPlist,
+            updateBlocks: [layout.updateBlock],
+            legacyCompat: layout.legacyCompat,
+            compatTools: layout.compatTools,
+            directories: [layout.support, layout.caches],
+            libraries: [],
+            repair: { _ in throw Offline() },
+            stop: { _ in false }
+        )
+
+        #expect(outcome.steamNeedsRedownload)
+    }
+
+    @Test("The command line names the path it could not write")
+    func namesTheRefusedPath() {
+        let path = "/nonexistent/Steam.app/Contents/Info.plist"
+        let message = RemoveEverythingCommand.failureMessage(WriteRefused(path: path))
+        #expect(message.hasPrefix("Could not write \(path). "))
+        #expect(RemoveEverythingCommand.failureMessage(StepFailure(step: "x", detail: "Steam is running, please close Steam."))
+            == StepFailure(step: "x", detail: "Steam is running, please close Steam.").localizedDescription)
     }
 
     @Test("The copy the restore downloads is removed with everything else")
@@ -229,8 +303,9 @@ struct UninstallTests {
             innerPlist: layout.innerPlist,
             updateBlocks: [layout.updateBlock],
             legacyCompat: layout.legacyCompat,
-            compatTool: layout.compatTool,
+            compatTools: layout.compatTools,
             directories: [layout.support, caches],
+            libraries: [],
             repair: { _ in
                 let staged = caches.appending(path: "bundle")
                 try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
@@ -256,8 +331,9 @@ struct UninstallTests {
             innerPlist: layout.innerPlist,
             updateBlocks: [layout.updateBlock],
             legacyCompat: layout.legacyCompat,
-            compatTool: layout.compatTool,
+            compatTools: layout.compatTools,
             directories: [layout.support, layout.caches],
+            libraries: [],
             report: { log.add($0) },
             repair: { report in
                 report(.checking)
@@ -280,4 +356,92 @@ struct UninstallTests {
         #expect(labels.contains(RepairPhase.replacing.label))
     }
 
+    @Test("Uninstall removes templates of installed builds but keeps unrelated library data")
+    func removesLibraryTemplates() async throws {
+        let layout = try layout()
+        defer { try? FileManager.default.removeItem(at: layout.root) }
+        let library = SteamLibrary(root: layout.root.appending(path: "library"))
+        let build = "26.3.0.39832"
+        let templates = SupportPaths.prefixTemplates(forBuild: build, in: library)
+        for template in templates {
+            try FileManager.default.createDirectory(at: template, withIntermediateDirectories: true)
+        }
+        try FileManager.default.createDirectory(
+            at: SupportPaths.clonedRoot(forBuild: build, runners: layout.support.appending(path: "runners")),
+            withIntermediateDirectories: true)
+        let unrelated = templates[0].deletingLastPathComponent().appending(path: "notes")
+        try Data("keep".utf8).write(to: unrelated)
+
+        _ = try await Uninstall.run(
+            app: layout.app, innerPlist: layout.innerPlist, updateBlocks: [layout.updateBlock],
+            legacyCompat: layout.legacyCompat, compatTools: layout.compatTools,
+            directories: [layout.support, layout.caches], libraries: [library],
+            repair: { _ in }, stop: { _ in false })
+
+        for template in templates { #expect(!FileManager.default.fileExists(atPath: template.path)) }
+        #expect(try String(contentsOf: unrelated, encoding: .utf8) == "keep")
+        #expect(FileManager.default.fileExists(atPath: library.compatdata.appending(path: ".notproton-template.lock").path))
+    }
+
+    @Test("Uninstall removes the Steam.dll links it made and leaves any other Steam.dll")
+    func removesSteamDLLLinks() async throws {
+        let layout = try layout()
+        defer { try? FileManager.default.removeItem(at: layout.root) }
+        let files = FileManager.default
+        let ours = SteamLibrary(root: layout.root.appending(path: "ours"))
+        let foreign = SteamLibrary(root: layout.root.appending(path: "foreign"))
+        let real = SteamLibrary(root: layout.root.appending(path: "real"))
+        let empty = SteamLibrary(root: layout.root.appending(path: "empty"))
+        func dll(_ library: SteamLibrary) -> URL { library.steamapps.appending(path: "common/Steam.dll") }
+        for library in [ours, foreign, real] {
+            try files.createDirectory(at: dll(library).deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
+        try files.createSymbolicLink(
+            atPath: dll(ours).path(percentEncoded: false),
+            withDestinationPath: layout.legacyCompat.appending(path: "Steam.dll").path(percentEncoded: false))
+        let elsewhere = layout.root.appending(path: "elsewhere/Steam.dll")
+        try files.createDirectory(at: elsewhere.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("other".utf8).write(to: elsewhere)
+        try files.createSymbolicLink(
+            atPath: dll(foreign).path(percentEncoded: false),
+            withDestinationPath: elsewhere.path(percentEncoded: false))
+        try Data("real".utf8).write(to: dll(real))
+
+        let outcome = try await Uninstall.run(
+            app: layout.app, innerPlist: layout.innerPlist, updateBlocks: [layout.updateBlock],
+            legacyCompat: layout.legacyCompat, compatTools: layout.compatTools,
+            directories: [layout.support, layout.caches], libraries: [ours, foreign, real, empty],
+            repair: { _ in }, stop: { _ in false })
+
+        #expect((try? files.destinationOfSymbolicLink(atPath: dll(ours).path(percentEncoded: false))) == nil)
+        #expect(outcome.removed.filter { $0 == "Steam.dll" }.count == 1)
+        #expect(
+            try files.destinationOfSymbolicLink(atPath: dll(foreign).path(percentEncoded: false))
+                == elsewhere.path(percentEncoded: false))
+        #expect(try String(contentsOf: dll(real), encoding: .utf8) == "real")
+        #expect(!files.fileExists(atPath: empty.root.path(percentEncoded: false)))
+    }
+
+    @Test("Uninstall reports template cleanup refusal rather than claiming completion")
+    func reportsTemplateCleanupFailure() async throws {
+        let layout = try layout()
+        defer { try? FileManager.default.removeItem(at: layout.root) }
+        let library = SteamLibrary(root: layout.root.appending(path: "library"))
+        try FileManager.default.createDirectory(at: library.compatdata, withIntermediateDirectories: true)
+        let outside = layout.root.appending(path: "outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let sentinel = outside.appending(path: "crossover-26.3.0.39832-x86_64-unix")
+        try Data("keep".utf8).write(to: sentinel)
+        try FileManager.default.createSymbolicLink(
+            at: library.compatdata.appending(path: SupportPaths.prefixTemplateFolder), withDestinationURL: outside)
+
+        await #expect(throws: StepFailure.self) {
+            _ = try await Uninstall.run(
+                app: layout.app, innerPlist: layout.innerPlist, updateBlocks: [layout.updateBlock],
+                legacyCompat: layout.legacyCompat, compatTools: layout.compatTools,
+                directories: [layout.support, layout.caches], libraries: [library],
+                repair: { _ in }, stop: { _ in false })
+        }
+        #expect(try String(contentsOf: sentinel, encoding: .utf8) == "keep")
+    }
 }

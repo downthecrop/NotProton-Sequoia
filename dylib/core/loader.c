@@ -7,6 +7,7 @@
 #include "../core/macho.h"
 #include "../hooks/hooks.h"
 #include "../feats/compat.h"
+#include "../feats/input_access.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,7 @@
 #include <stdint.h>
 #include <dirent.h>
 #include <mach-o/dyld.h>
+#include <crt_externs.h>
 #include <libgen.h>
 
 #define STEAMCLIENT_DYLIB "steamclient.dylib"
@@ -155,6 +157,8 @@ static void *install_thread(void *unused) {
         return NULL;
     }
 
+    np_input_access_check();
+
     uintptr_t text_base = 0;
     size_t text_size = 0;
 
@@ -194,8 +198,7 @@ static void *install_thread(void *unused) {
         return NULL;
     }
 
-    // Registers compatibility tool.
-    np_compat_ensure_tool_manifest();
+    np_hooks_launch_install(mh, slide);
 
     int total = 0;
     int installed = np_hooks_install_all(mh, slide, &resolved, &total);
@@ -240,10 +243,30 @@ static void np_log_platform_overrides(void) {
         NP_LOG("np_init: no platform override env set, client reports as macOS");
 }
 
+// Steam Helper runs /usr/bin/profiles at startup. If a user has SIP disabled, profiles would inherit the insert and crash, yikes.
+static int is_main_helper(const char *pn) {
+    if (strcmp(pn, "Steam Helper") != 0)
+        return 0;
+    int argc = *_NSGetArgc();
+    char **argv = *_NSGetArgv();
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--type=", 7) == 0)
+            return 0;
+    }
+    return 1;
+}
+
 __attribute__((constructor))
 static void np_init(void) {
     const char *pn = getprogname();
-    if (!pn || strcmp(pn, "steam_osx") != 0)
+    if (!pn)
+        return;
+    if (is_main_helper(pn)) {
+        np_log_attach();
+        np_hooks_spawn_install();
+        return;
+    }
+    if (strcmp(pn, "steam_osx") != 0)
         return;
 
     np_log_init();
@@ -256,6 +279,9 @@ static void np_init(void) {
 
     np_log_platform_overrides();
     np_compat_export_tools_path();
+    // Steam scans compatibilitytools.d at startup, so the tool directories have to exist
+    // before that occurs.
+    np_compat_ensure_tool_manifest();
     np_hooks_spawn_install();
 
     if (pthread_create(&g_install, NULL, install_thread, NULL) == 0)

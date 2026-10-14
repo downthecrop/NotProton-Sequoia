@@ -29,6 +29,7 @@ enum SupportPaths {
         support.appending(path: "signatures/macos.arm64")
     }
 
+    static var fonts: URL { support.appending(path: "fonts") }
     static var overlayShim: URL { support.appending(path: "overlay-shim.dylib") }
     static var iconmaker: URL { support.appending(path: "iconmaker") }
     static var appinfo: URL { support.appending(path: "appinfo") }
@@ -39,7 +40,8 @@ enum SupportPaths {
 
     static var deployedVersion: URL { support.appending(path: "dylib.version") }
 
-    static var currentRunner: URL { runners.appending(path: "current") }
+    // Read by the dylib at Steam launch, in np_compat_load_tool_list.
+    static var toolList: URL { support.appending(path: "tools") }
 
     static func runnerRoot(forBuild build: String, runners: URL = SupportPaths.runners) -> URL {
         runners.appending(path: "crossover-\(build)")
@@ -52,6 +54,17 @@ enum SupportPaths {
     static func clonedRoot(forBuild build: String, runners: URL = SupportPaths.runners) -> URL {
         runnerRoot(forBuild: build, runners: runners).appending(path: "CrossOver")
     }
+
+    static func prefixTemplates(forBuild build: String, in library: SteamLibrary) -> [URL] {
+        CompatTool.Flavor.allCases.map { prefixTemplate(forBuild: build, flavor: $0, in: library) }
+    }
+
+    static func prefixTemplate(forBuild build: String, flavor: CompatTool.Flavor, in library: SteamLibrary) -> URL {
+        library.compatdata.appending(path: prefixTemplateFolder).appending(path: "crossover-\(build)-\(flavor.unixDir)")
+    }
+
+    static let prefixTemplateFolder = "notproton-template"
+    static let bridgeCacheFolder = "bridge"
 
     enum Steam {
         static var app: URL { URL(filePath: "/Applications/Steam.app") }
@@ -81,8 +94,13 @@ enum SupportPaths {
         static var innerConfigFile: URL { innerClient.appending(path: "steam.cfg") }
         static var legacyCompat: URL { innerClient.appending(path: "legacycompat") }
 
-        static var compatTool: URL {
-            userData.appending(path: "compatibilitytools.d/notproton")
+        static var compatTools: URL { userData.appending(path: "compatibilitytools.d") }
+
+        static func notprotonTools(in directory: URL = compatTools) -> [URL] {
+            let entries = (try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: nil
+            )) ?? []
+            return entries.filter { $0.lastPathComponent.hasPrefix("notproton") }
         }
 
         static var libraryFoldersVDF: URL { userData.appending(path: "steamapps/libraryfolders.vdf") }

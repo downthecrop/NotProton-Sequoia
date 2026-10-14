@@ -39,6 +39,7 @@ jobs:
           codesign --verify --strict release/extracted/NotProton.app
           actual=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' release/extracted/NotProton.app/Contents/Info.plist)
           test "$actual" = "$VERSION"
+          make -s mincheck APP_BUNDLE=release/extracted/NotProton.app
 
       - name: Resolve Sparkle tools
         run: swift package resolve --package-path app

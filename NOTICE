@@ -23,6 +23,10 @@ The app bundle embeds Sparkle, which checks for and installs updates. Sparkle is
 MIT licensed, see
 https://github.com/sparkle-project/Sparkle/blob/2.10.0/LICENSE
 
+/fonts/ contains the font sources from Valve's Proton repo. Fonts are licensed
+under their original licenses, see the LICENSE file in each folder. The build
+files from Proton are covered by LICENSE.fonts.
+
 These third party files carry their original notices from the project authors:
 
   steam-shim/jsoncpp.cpp             JsonCpp, public domain / MIT (header)

@@ -23,8 +23,11 @@ enum UninstallPhase: Sendable {
 struct UninstallOutcome: Sendable {
     let stoppedClient: Bool
     let detached: Bool
+    let steamInstalled: Bool
     let restoredValveSignature: Bool
     let removed: [String]
+
+    var steamNeedsRedownload: Bool { steamInstalled && !restoredValveSignature }
 }
 
 enum Uninstall {
@@ -39,11 +42,12 @@ enum Uninstall {
         innerPlist: URL = SupportPaths.Steam.innerInfoPlist,
         updateBlocks: [URL] = UpdateBlock.paths,
         legacyCompat: URL = SupportPaths.Steam.legacyCompat,
-        compatTool: URL = SupportPaths.Steam.compatTool,
+        compatTools: [URL] = SupportPaths.Steam.notprotonTools(),
         directories: [URL] = [
             SupportPaths.support,
             SupportPaths.packageDownloads.deletingLastPathComponent(),
         ],
+        libraries: [SteamLibrary] = PrefixStore.libraries(),
         report: @escaping @Sendable (UninstallPhase) -> Void = { _ in },
         repair: Repair = { report in _ = try await SteamRepair.run(report: report) },
         stop: Stop = { onStopping in try SteamBundle.stopClient(step: step, onStopping: onStopping) }
@@ -53,23 +57,32 @@ enum Uninstall {
         report(.detaching)
         let detached = try detach(from: app, innerPlist: innerPlist, updateBlocks: updateBlocks)
 
-        let restored: Bool
-        do {
-            try await repair { report(.restoring($0)) }
-            restored = true
-        } catch {
-            restored = false
+        // Validate if Steam is present before restoring
+        let steamInstalled = FileManager.default.fileExists(atPath: app.path(percentEncoded: false))
+        var restored = false
+        if steamInstalled {
+            do {
+                try await repair { report(.restoring($0)) }
+                restored = true
+            } catch {}
         }
 
         report(.removing)
-        let removed = try remove(
-            legacyCompat: legacyCompat, compatTool: compatTool, directories: directories
+        var removed = try remove(
+            legacyCompat: legacyCompat, compatTools: compatTools, directories: directories
         )
+        removed += try removeSteamDLLLinks(to: legacyCompat, in: libraries)
+        let templateFailures = RunnerInstaller.removePrefixTemplates(
+            keeping: [], libraries: libraries, removingFolder: true)
+        if !templateFailures.isEmpty {
+            throw StepFailure(step: step, detail: templateFailures.map(\.detail).joined(separator: "\n"))
+        }
 
         report(.finished)
         return UninstallOutcome(
             stoppedClient: stopped,
             detached: detached,
+            steamInstalled: steamInstalled,
             restoredValveSignature: restored,
             removed: removed
         )
@@ -106,15 +119,30 @@ enum Uninstall {
         return true
     }
 
-    static func remove(legacyCompat: URL, compatTool: URL, directories: [URL]) throws -> [String] {
+    static func remove(legacyCompat: URL, compatTools: [URL], directories: [URL]) throws -> [String] {
         let files = FileManager.default
         var removed: [String] = []
 
-        for target in [legacyCompat, compatTool] + directories {
+        for target in [legacyCompat] + compatTools + directories {
             let path = target.path(percentEncoded: false)
             guard files.fileExists(atPath: path) else { continue }
             try WriteRefused.catching(path) { try files.removeItem(at: target) }
             removed.append(target.lastPathComponent)
+        }
+        return removed
+    }
+
+    // Links the run script made point at legacycompat. Anything else at that name is left alone.
+    static func removeSteamDLLLinks(to legacyCompat: URL, in libraries: [SteamLibrary]) throws -> [String] {
+        let files = FileManager.default
+        let target = legacyCompat.appending(path: "Steam.dll").path(percentEncoded: false)
+        var removed: [String] = []
+        for library in libraries {
+            let link = library.steamapps.appending(path: "common/Steam.dll")
+            let path = link.path(percentEncoded: false)
+            guard (try? files.destinationOfSymbolicLink(atPath: path)) == target else { continue }
+            try WriteRefused.catching(path) { try files.removeItem(at: link) }
+            removed.append(link.lastPathComponent)
         }
         return removed
     }
